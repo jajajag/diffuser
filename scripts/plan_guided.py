@@ -1,8 +1,8 @@
-import pdb
-
 import diffuser.sampling as sampling
 import diffuser.utils as utils
-
+import pdb
+from diffuser.utils.heads import ensure_heads
+from diffuser.sampling.dual_guidance import n_step_dual_guided_p_sample
 
 #-----------------------------------------------------------------------------#
 #----------------------------------- setup -----------------------------------#
@@ -49,6 +49,11 @@ logger_config = utils.Config(
     max_render=args.max_render,
 )
 
+T_hat, R_hat, _, _ = ensure_heads(
+    args, dataset, device=args.device, pretrain_if_missing=False,
+    s_dim=dataset.observation_dim, a_dim=dataset.action_dim,
+)
+
 ## policies are wrappers around an unconditional diffusion model and a value guide
 policy_config = utils.Config(
     args.policy,
@@ -59,10 +64,17 @@ policy_config = utils.Config(
     preprocess_fns=args.preprocess_fns,
     ## sampling kwargs
     sample_fn=sampling.n_step_guided_p_sample,
+    # Using dual guidance
+    #sample_fn=n_step_dual_guided_p_sample,
     n_guide_steps=args.n_guide_steps,
     t_stopgrad=args.t_stopgrad,
     scale_grad_by_std=args.scale_grad_by_std,
     verbose=False,
+    # dual guidance kwargs
+    T_hat=T_hat, R_hat=R_hat,
+    s_dim=dataset.observation_dim, a_dim=dataset.action_dim,
+    alpha=getattr(args, 'alpha', 0.1),
+    lambda_tr_guide=getattr(args, 'lambda_tr_guide', 1.0),
 )
 
 logger = logger_config()

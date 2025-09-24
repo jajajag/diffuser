@@ -1,20 +1,33 @@
-from collections import namedtuple
-import numpy as np
-import torch
-from torch import nn
-import pdb
-
 import diffuser.utils as utils
+import numpy as np
+import pdb
+import torch
+import torch.nn.functional as F
+from collections import namedtuple
+from torch import nn
 from .helpers import (
     cosine_beta_schedule,
     extract,
     apply_conditioning,
     Losses,
 )
-
+from diffuser.models.dmemm_losses import (
+    reconstruct_x0, transition_loss, reward_mod_loss, reward_aware_diff_loss
+)
 
 Sample = namedtuple('Sample', 'trajectories values chains')
 
+def _align_time_to(x, T):
+    Tx = x.shape[1]
+    if Tx == T: return x
+    if Tx > T:
+        start = (Tx - T) // 2
+        return x[:, start:start+T, :]
+    pad = T - Tx
+    left, right = pad // 2, pad - pad // 2
+    x_ = x.transpose(1, 2)
+    x_ = F.pad(x_, (left, right))
+    return x_.transpose(1, 2)
 
 @torch.no_grad()
 def default_sample_fn(model, x, cond, t):
@@ -144,19 +157,25 @@ class GaussianDiffusion(nn.Module):
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
     def p_mean_variance(self, x, cond, t):
-        x_recon = self.predict_start_from_noise(x, t=t, noise=self.model(x, cond, t))
+        #x_recon = self.predict_start_from_noise(
+        #        x, t=t, noise=self.model(x, cond, t))
+        eps = self.model(x, cond, t)
+        eps = _align_time_to(eps, x.shape[1])
+        x_recon = self.predict_start_from_noise(x, t=t, noise=eps)
 
         if self.clip_denoised:
             x_recon.clamp_(-1., 1.)
         else:
             assert RuntimeError()
 
-        model_mean, posterior_variance, posterior_log_variance = self.q_posterior(
-                x_start=x_recon, x_t=x, t=t)
+        model_mean, posterior_variance, posterior_log_variance = \
+                self.q_posterior(x_start=x_recon, x_t=x, t=t)
+
         return model_mean, posterior_variance, posterior_log_variance
 
-    @torch.no_grad()
-    def p_sample_loop(self, shape, cond, verbose=True, return_chain=False, sample_fn=default_sample_fn, **sample_kwargs):
+    #@torch.no_grad()
+    def p_sample_loop(self, shape, cond, verbose=True, return_chain=False,
+                      sample_fn=default_sample_fn, **sample_kwargs):
         device = self.betas.device
 
         batch_size = shape[0]
@@ -180,7 +199,7 @@ class GaussianDiffusion(nn.Module):
         if return_chain: chain = torch.stack(chain, dim=1)
         return Sample(x, values, chain)
 
-    @torch.no_grad()
+    #@torch.no_grad()
     def conditional_sample(self, cond, horizon=None, **sample_kwargs):
         '''
             conditions : [ (time, state), ... ]
@@ -205,21 +224,47 @@ class GaussianDiffusion(nn.Module):
 
         return sample
 
+    @staticmethod
+    def _split_tau(tau0, s_dim, a_dim):
+        s = tau0[..., :s_dim]
+        a = tau0[..., s_dim:s_dim + a_dim]
+        s_next = torch.roll(s, shifts=-1, dims=1)
+        return s, a, s_next
+
     def p_losses(self, x_start, cond, t):
         noise = torch.randn_like(x_start)
-
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
         x_noisy = apply_conditioning(x_noisy, cond, self.action_dim)
+        eps_pred = self.model(x_noisy, cond, t)
+        eps_pred = _align_time_to(eps_pred, x_noisy.shape[1])
+        eps_pred = apply_conditioning(eps_pred, cond, self.action_dim)
 
-        x_recon = self.model(x_noisy, cond, t)
-        x_recon = apply_conditioning(x_recon, cond, self.action_dim)
+        sqrt_bar = extract(self.sqrt_alphas_cumprod, t, x_start.shape)
+        sqrt_one_minus = extract(self.sqrt_one_minus_alphas_cumprod, t,
+                                 x_start.shape)
+        tau0_hat = reconstruct_x0(x_noisy, eps_pred, sqrt_bar, sqrt_one_minus)
+        s, a, s_next = self._split_tau(tau0_hat, self.observation_dim,
+                                       self.action_dim)
 
-        assert noise.shape == x_recon.shape
+        with torch.no_grad():
+            mu_T, logvar_T = self.T_hat(s[:, :-1, :], a[:, :-1, :])
+            diff = (s_next[:, :-1, :] - mu_T)
+            # mean over [B, T-1, s_dim] -> scale-stable
+            L_tr = diff.pow(2).mean()
+            #nll = 0.5 * ((s_next[:, :-1, :] - mu_T).pow(2) * torch.exp(
+            #    -logvar_T) + logvar_T)
+            #L_tr = nll.mean()
+            ret_hat = self.R_hat(s, a).sum(dim=1)    # [B]
+        L_rd = (-ret_hat.mean())
+        w = (ret_hat / (self.tmax * self.rmax)).clamp_(0, 1)
+        L_rwdiff = reward_aware_diff_loss(noise, eps_pred, w)
 
-        if self.predict_epsilon:
-            loss, info = self.loss_fn(x_recon, noise)
-        else:
-            loss, info = self.loss_fn(x_recon, x_start)
+        loss = L_rwdiff + self.lambda_tr * L_tr + self.lambda_rd * L_rd
+        info = {
+            'L_rwdiff': L_rwdiff.item(),
+            'L_tr': L_tr.item(),
+            'L_rd': L_rd.item()
+        }
 
         return loss, info
 

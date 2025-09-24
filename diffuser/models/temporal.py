@@ -134,7 +134,19 @@ class TemporalUnet(nn.Module):
         x = self.mid_block2(x, t)
 
         for resnet, resnet2, attn, upsample in self.ups:
-            x = torch.cat((x, h.pop()), dim=1)
+            #x = torch.cat((x, h.pop()), dim=1)
+
+            skip = h.pop()
+            t_x, t_skip = x.shape[-1], skip.shape[-1]
+            if t_skip != t_x:
+                if t_skip > t_x:
+                    start = (t_skip - t_x) // 2
+                    skip = skip[..., start:start + t_x]
+                else:
+                    import torch.nn.functional as F
+                    skip = F.pad(skip, (0, t_x - t_skip))
+            x = torch.cat((x, skip), dim=1)
+
             x = resnet(x, t)
             x = resnet2(x, t)
             x = attn(x)

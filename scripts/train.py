@@ -1,4 +1,8 @@
 import diffuser.utils as utils
+import torch, torch.nn.functional as F
+from diffuser.utils.heads import ensure_heads
+from diffuser.models.dmemm_losses import reconstruct_x0, transition_loss, \
+        reward_mod_loss, reward_aware_diff_loss
 
 
 #-----------------------------------------------------------------------------#
@@ -96,8 +100,23 @@ model = model_config()
 
 diffusion = diffusion_config(model)
 
-trainer = trainer_config(diffusion, dataset, renderer)
+# Pretrain or load heads and attach to diffusion
+T_hat, R_hat, t_ckpt, r_ckpt = ensure_heads(
+    args, dataset, device=args.device, pretrain_if_missing=True,
+    steps=50000, lr=3e-4, batch_size=64,
+    learn_var=False, train_reward=True,
+    s_dim=observation_dim, a_dim=action_dim,
+)
+print(f"[heads] using:\n T: {t_ckpt}\n R: {r_ckpt}", flush=True)
+diffusion.T_hat = T_hat
+diffusion.R_hat = R_hat
+# DMEMM hyperparameters (give default values, also allow command line override)
+diffusion.lambda_tr = getattr(args, 'lambda_tr', 1.0)
+diffusion.lambda_rd = getattr(args, 'lambda_rd', 0.1)
+diffusion.tmax = getattr(args, 'horizon', 32)
+diffusion.rmax = getattr(args, 'rmax', 1.0)
 
+trainer = trainer_config(diffusion, dataset, renderer)
 
 #-----------------------------------------------------------------------------#
 #------------------------ test forward & backward pass -----------------------#

@@ -61,6 +61,10 @@ base = {
         'bucket': None,
         'device': 'cuda',
         'seed': None,
+        # DMEMM hyperparams
+        'lambda_tr': 1.0,
+        'lambda_rd': 0.1,
+        'rmax': 1.0,
     },
 
     'values': {
@@ -145,6 +149,9 @@ base = {
 
         'verbose': True,
         'suffix': '0',
+
+        'alpha': 0.1,              # guidance
+        'lambda_tr_guide': 1.0,
     },
 }
 

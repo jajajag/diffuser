@@ -154,11 +154,24 @@ class Trainer(object):
             loads model and ema from disk
         '''
         loadpath = os.path.join(self.logdir, f'state_{epoch}.pt')
-        data = torch.load(loadpath)
+        #data = torch.load(loadpath)
 
-        self.step = data['step']
-        self.model.load_state_dict(data['model'])
-        self.ema_model.load_state_dict(data['ema'])
+        #self.step = data['step']
+        #self.model.load_state_dict(data['model'])
+        #self.ema_model.load_state_dict(data['ema'])
+        data = torch.load(loadpath, map_location=getattr(self, "device", "cpu"))
+        self.step = data.get("step", 0)
+        def _strip_head_keys(sd, tag):
+            if not isinstance(sd, dict): return sd
+            drop = [k for k in list(sd.keys()) if k.startswith("T_hat.") \
+                    or k.startswith("R_hat.")]
+            for k in drop: sd.pop(k)
+            return sd
+        sd_model = _strip_head_keys(data.get("model", {}), "model")
+        self.model.load_state_dict(sd_model, strict=False)
+        if "ema" in data and hasattr(self, "ema_model"):
+            sd_ema = _strip_head_keys(data["ema"], "ema")
+            self.ema_model.load_state_dict(sd_ema, strict=False)
 
     #-----------------------------------------------------------------------------#
     #--------------------------------- rendering ---------------------------------#
