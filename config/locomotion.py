@@ -62,8 +62,9 @@ base = {
         'device': 'cuda',
         'seed': None,
         # DMEMM hyperparams
-        'lambda_tr': 1.0,
-        'lambda_rd': 0.1,
+        'tr_loss': 'huber',
+        'lambda_tr': 0.1,
+        'lambda_rd': 0.05,
         'rmax': 1.0,
     },
 

@@ -57,7 +57,7 @@ def make_timesteps(batch_size, i, device):
 class GaussianDiffusion(nn.Module):
     def __init__(self, model, horizon, observation_dim, action_dim, n_timesteps=1000,
         loss_type='l1', clip_denoised=False, predict_epsilon=True,
-        action_weight=1.0, loss_discount=1.0, loss_weights=None,
+        action_weight=1.0, loss_discount=1.0, loss_weights=None, tr_loss='huber'
     ):
         super().__init__()
         self.horizon = horizon
@@ -65,6 +65,7 @@ class GaussianDiffusion(nn.Module):
         self.action_dim = action_dim
         self.transition_dim = observation_dim + action_dim
         self.model = model
+        self.tr_loss = tr_loss
 
         betas = cosine_beta_schedule(n_timesteps)
         alphas = 1. - betas
@@ -248,12 +249,27 @@ class GaussianDiffusion(nn.Module):
 
         with torch.no_grad():
             mu_T, logvar_T = self.T_hat(s[:, :-1, :], a[:, :-1, :])
-            diff = (s_next[:, :-1, :] - mu_T)
-            # mean over [B, T-1, s_dim] -> scale-stable
-            L_tr = diff.pow(2).mean()
-            #nll = 0.5 * ((s_next[:, :-1, :] - mu_T).pow(2) * torch.exp(
-            #    -logvar_T) + logvar_T)
-            #L_tr = nll.mean()
+            if self.tr_loss == 'l2':
+                # 1. L2 transition loss
+                diff = (s_next[:, :-1, :] - mu_T)
+                L_tr = diff.pow(2).mean()
+            elif self.tr_loss == 'clipped':
+                # 2. Clipped L2 transition loss
+                diff = (s_next[:, :-1, :] - mu_T)
+                per = diff.pow(2).mean(dim=(1,2))
+                cap = per.quantile(0.95).detach()
+                L_tr = per.clamp_max(cap).mean()
+            elif self.tr_loss == 'huber':
+                # 3. Huber transition loss
+                L_tr = torch.nn.functional.smooth_l1_loss(
+                        s_next[:, :-1, :], mu_T, reduction='mean', beta=1.0)
+            elif self.tr_loss == 'nll':
+                # 4. Negative log likelihood transition loss
+                nll = 0.5 * ((s_next[:, :-1, :] - mu_T).pow(2) * torch.exp(
+                    -logvar_T) + logvar_T)
+                L_tr = nll.mean()
+            else:
+                raise ValueError(f"Unknown tr_loss: {self.tr_loss}")
             ret_hat = self.R_hat(s, a).sum(dim=1)    # [B]
         L_rd = (-ret_hat.mean())
         w = (ret_hat / (self.tmax * self.rmax)).clamp_(0, 1)
